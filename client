@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+import sys
+import socket
+import json
+import string
+from copy import deepcopy
+import listOfWords
+import ssl
+
+
+# creates a sorted dict of "word", letter frequency values so that the word at the top is comprised of the most likely letters to appear
+def rankWordsByFrequency():
+    lowercaseInitialFreq = {
+        "e": 0,
+        "t": 0,
+        "a": 0,
+        "o": 0,
+        "i": 0,
+        "n": 0,
+        "s": 0,
+        "r": 0,
+        "h": 0,
+        "d": 0,
+        "l": 0,
+        "u": 0,
+        "c": 0,
+        "m": 0,
+        "f": 0,
+        "y": 0,
+        "w": 0,
+        "g": 0,
+        "p": 0,
+        "b": 0,
+        "v": 0,
+        "k": 0,
+        "x": 0,
+        "q": 0,
+        "j": 0,
+        "z": 0,
+    }
+
+    # this is a frequency chart for each letter based on its occurance in the english language.
+    # letter, number
+    totalLetters = 0
+    for word in listOfAllWords:
+        for letter in word:
+            lowercaseInitialFreq[letter] += 1
+            totalLetters += 1
+    for key in lowercaseInitialFreq:
+        lowercaseInitialFreq[key] /= totalLetters
+        # print(lowercaseInitialFreq[key])
+
+    dictOfWords = {}
+    for word in listOfAllWords:
+        wordSum = 0
+        flag = True
+        for i, letter in enumerate(word):
+            wordSum += lowercaseInitialFreq[letter]
+            # wordSum += lowercaseLetterFrequency[letter]
+            # checks for duplicate letters, prioritizes words with unique letters to maximize guessing
+            for j in range(i + 1, len(word)):
+                if word[i] == word[j]:
+                    flag = False
+
+        if flag:
+            wordSum = wordSum * 1.25
+        dictOfWords[word] = wordSum
+
+    # sort the dict based on value
+    sortedDict = dict(
+        sorted(dictOfWords.items(), key=lambda item: item[1], reverse=True)
+    )
+
+    return sortedDict, lowercaseInitialFreq
+
+
+# rank remaining possile words based on frequency of reamining letters
+def rankLettersLeftByFrequency(lowercaseLetterFrequency):
+    global lettersPossible
+
+    dictOfWords = {}
+    for word in HashmapOfWordsAndTheirValues:
+        lettersLeftSum = 0
+        flag = True
+        for i, letter in enumerate(word):
+            # its not a 2/ green guess
+            if len(lettersPossible[i]) != 1:
+                lettersLeftSum += lowercaseLetterFrequency[letter]
+            # check for duplicates
+            for j in range(i + 1, len(word)):
+                if word[i] == word[j]:
+                    flag = False
+
+        dictOfWords[word] = lettersLeftSum
+        if flag:
+            lettersLeftSum = lettersLeftSum * 1.25
+        dictOfWords[word] = lettersLeftSum
+    # sort words by calculated letterFrequency scopre
+    sortedDict = dict(
+        sorted(dictOfWords.items(), key=lambda item: item[1], reverse=True)
+    )
+    return sortedDict
+
+
+# Update possible letters based on the feedback from the server
+def updateBasedOnGuess(guessedWord, values):
+    global lettersPossible, defExists
+    for index, (letter, value) in enumerate(zip(guessedWord, values)):
+        # Remove letter from the current position if it's not in the word
+        if value == 0:
+            if letter in lettersPossible[index]:
+                lettersPossible[index].remove(letter)
+
+        # Remove the letter from this position
+        elif value == 1:
+            if letter in lettersPossible[index]:
+                lettersPossible[index].remove(letter)
+            if letter not in defExists:
+                defExists.append(letter)
+        # Set only this letter as possible at this position
+        elif value == 2:
+            lettersPossible[index] = [letter]
+            if letter not in defExists:
+                defExists.append(letter)
+
+
+# Update word list based on possible letters in each position
+def updateDict(HashmapOfWordsAndTheirValues):
+    global lettersPossible
+    wordsToDelete = set()
+    for word in HashmapOfWordsAndTheirValues:
+        # Ensure each letter in the word is a possible letter for its positionifif
+        if not all(letter in word for letter in defExists):
+            wordsToDelete.add(word)
+            continue
+
+        # Check if any letter in the word is not in the possible letters for its position
+        if any(word[index] not in lettersPossible[index] for index in range(len(word))):
+            wordsToDelete.add(word)
+            continue
+
+    # Delete the marked words from the dictionary
+    for word in wordsToDelete:
+        del HashmapOfWordsAndTheirValues[word]
+
+
+# Connect to the game server
+def connectToServer(hostname, port, useTls):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if useTls:
+        context = ssl.create_default_context()
+        sock = context.wrap_socket(sock, server_hostname=hostname)
+    sock.connect((hostname, port))
+    return sock
+
+
+# Send a message to the game server
+def sendMessage(sock, message):
+    messageStr = json.dumps(message) + "\n"
+    sock.sendall(messageStr.encode("utf-8"))
+
+
+# Receive a message from the game server
+def receiveMessage(sock):
+    bufferSize = 4096
+    data = ""
+    while True:
+        chunk = sock.recv(bufferSize).decode("utf-8")
+        data += chunk
+        if "\n" in chunk:
+            break
+    return json.loads(data)
+
+
+# Main game logic
+def main(hostname, northeasternUsername, port, useTls):
+    global listOfAllWords, HashmapOfWordsAndTheirValues, lettersPossible, numGuesses, defExists
+    # Setup initial conditions
+    alphabet = list(string.ascii_lowercase)
+    lettersPossible = [deepcopy(alphabet) for _ in range(5)]
+    numGuesses = 0
+    defExists = []
+    letterFrequency = {}
+    listOfAllWords = listOfWords.listOfAllWords.copy()
+    HashmapOfWordsAndTheirValues, letterFrequency = rankWordsByFrequency()
+    socketz = connectToServer(hostname, port, useTls)
+
+    # Send hello message
+    helloMessage = {"type": "hello", "northeastern_username": northeasternUsername}
+    sendMessage(socketz, helloMessage)
+
+    gameId = None
+    lastWordGuessed = ""
+
+    # Handle server response
+    while True:
+        response = receiveMessage(socketz)
+        responseType = response["type"]
+
+        # Game started, prepare for guessing
+        if responseType == "start":
+            gameId = response["id"]
+            guess = next(iter(HashmapOfWordsAndTheirValues.keys()))
+            guessMessage = {"type": "guess", "id": gameId, "word": guess}
+            sendMessage(socketz, guessMessage)
+            numGuesses += 1
+        # Server gets sent another guess, last one wasn't correct, update data
+        elif responseType == "retry":
+            lastGuessFeedback = response["guesses"][-1]
+            # print(lastGuessFeedback['word'], lastGuessFeedback['marks'])
+            lastWordGuessed = lastGuessFeedback["word"]
+            updateBasedOnGuess(lastWordGuessed, lastGuessFeedback["marks"])
+            # print(lettersPossible)
+            updateDict(HashmapOfWordsAndTheirValues)
+            HashmapOfWordsAndTheirValues = rankLettersLeftByFrequency(letterFrequency)
+            guess = next(iter(HashmapOfWordsAndTheirValues.keys()))
+            guessMessage = {"type": "guess", "id": gameId, "word": guess}
+            sendMessage(socketz, guessMessage)
+            numGuesses += 1
+            # print(len(HashmapOfWordsAndTheirValues))
+
+        # Correct guess or end of game
+        elif responseType == "bye":
+            print(response["flag"])
+            # print(lastWordGuessed)
+            # print(numGuesses)
+            break
+
+        elif responseType == "error":
+            print("Error from server:", response["message"])
+            break
+
+    socketz.close()
+
+
+if __name__ == "__main__":
+    args = sys.argv[1:]  # Skip the program name
+
+    # Default values
+    port = 27993
+    useTls = False
+
+    # Optional flags
+    if "-p" in args:
+        portIndex = args.index("-p")
+        port = int(args[portIndex + 1])
+        args.pop(portIndex)
+        args.pop(portIndex)
+
+    if "-s" in args:
+        useTls = True
+        port = 27994 if "-p" not in sys.argv else port
+        args.remove("-s")
+
+    # Required parameters
+    hostname = args[0]
+    northeasternUsername = args[1]
+
+    main(hostname, northeasternUsername, port, useTls)
